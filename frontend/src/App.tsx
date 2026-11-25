@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, Route, Routes, useNavigate, useParams } from "react-router-dom";
 import { Chess } from "chess.js";
 import { Chessboard } from "react-chessboard";
@@ -574,7 +574,15 @@ function Review({ onLoad }: { onLoad: (id: string) => Promise<Game> }) {
   const [game, setGame] = useState<Game | null>(null),
     [idx, setIdx] = useState(0),
     [err, setErr] = useState(""),
-    [job, setJob] = useState<any>(null);
+    [job, setJob] = useState<any>(null),
+    [orientation, setOrientation] = useState<"white" | "black">("white");
+  const [explorationBoard, setExplorationBoard] = useState<Chess | null>(null);
+  const [explorationAnalysis, setExplorationAnalysis] = useState<any>(null);
+  const [explorationPending, setExplorationPending] = useState(false);
+  const [explorationError, setExplorationError] = useState("");
+  const [boardWidth, setBoardWidth] = useState(620);
+  const boardShellRef = useRef<HTMLDivElement>(null);
+  const explorationRequest = useRef(0);
   useEffect(() => {
     if (id)
       onLoad(id)
@@ -583,6 +591,22 @@ function Review({ onLoad }: { onLoad: (id: string) => Promise<Game> }) {
           setErr(e.response?.data?.detail || "Unable to load this game"),
         );
   }, [id]);
+  useEffect(() => {
+    const element = boardShellRef.current;
+    if (!element) return;
+    const measure = () => setBoardWidth(Math.max(200, Math.min(620, element.clientWidth - 45)));
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [game]);
+  useEffect(() => {
+    explorationRequest.current += 1;
+    setExplorationBoard(null);
+    setExplorationAnalysis(null);
+    setExplorationPending(false);
+    setExplorationError("");
+  }, [idx]);
   useEffect(() => {
     if (!job?.id || ["completed", "failed"].includes(job.status)) return;
     const t = setInterval(
@@ -598,6 +622,26 @@ function Review({ onLoad }: { onLoad: (id: string) => Promise<Game> }) {
     );
     return () => clearInterval(t);
   }, [job?.id, job?.status, id]);
+  useEffect(() => {
+    const onArrow = (event: KeyboardEvent) => {
+      if (
+        event.altKey ||
+        event.ctrlKey ||
+        event.metaKey ||
+        event.target instanceof HTMLInputElement ||
+        event.target instanceof HTMLTextAreaElement
+      ) return;
+      if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        setIdx((current) => Math.max(0, current - 1));
+      } else if (event.key === "ArrowRight") {
+        event.preventDefault();
+        setIdx((current) => Math.min(game?.moves.length ?? 0, current + 1));
+      }
+    };
+    window.addEventListener("keydown", onArrow);
+    return () => window.removeEventListener("keydown", onArrow);
+  }, [game?.moves.length]);
   const board = useMemo(() => {
     if (!game) return new Chess();
     const c = new Chess(game.initial_fen);
@@ -627,6 +671,76 @@ function Review({ onLoad }: { onLoad: (id: string) => Promise<Game> }) {
       </div>
     );
   const selected = game.moves[idx - 1];
+  const evaluation = idx === 0
+    ? game.moves[0]?.analysis?.evaluation_before ?? null
+    : game.moves[idx - 1]?.analysis
+      ? (game.moves[idx - 1].color === "white" ? 1 : -1) * game.moves[idx - 1].analysis!.evaluation_after
+      : null;
+  const evaluationLabel = evaluation === null
+    ? "—"
+    : `${evaluation >= 0 ? "+" : "−"}${Math.min(Math.abs(evaluation), 99.9).toFixed(1)}`;
+  let bestMoveSan = selected?.analysis?.best_move_uci ?? null;
+  if (selected?.analysis?.best_move_uci) {
+    try {
+      const beforeSelected = new Chess(board.fen());
+      beforeSelected.undo();
+      const uci = selected.analysis.best_move_uci;
+      const bestMove = beforeSelected.move({
+        from: uci.slice(0, 2),
+        to: uci.slice(2, 4),
+        promotion: uci[4],
+      });
+      bestMoveSan = bestMove.san;
+    } catch {
+      // Keep the UCI move available if it cannot be converted to SAN.
+    }
+  }
+  const playedBestMove = selected?.uci === selected?.analysis?.best_move_uci;
+  const shownBoard = explorationBoard ?? board;
+  const currentBestMove = explorationBoard
+    ? explorationAnalysis?.best_move_uci
+    : game.moves[idx]?.analysis?.best_move_uci;
+  const customArrows = currentBestMove
+    ? [[currentBestMove.slice(0, 2), currentBestMove.slice(2, 4), "#e6b85c"] as [string, string, string]]
+    : [];
+  const shownEvaluation = explorationBoard
+    ? explorationAnalysis?.evaluation ?? null
+    : evaluation;
+  const shownEvaluationLabel = explorationBoard && explorationPending
+    ? "…"
+    : shownEvaluation === null
+      ? "—"
+      : `${shownEvaluation >= 0 ? "+" : "−"}${Math.min(Math.abs(shownEvaluation), 99.9).toFixed(1)}`;
+  const shownWhiteAdvantage = shownEvaluation === null
+    ? 50
+    : 50 + Math.tanh(shownEvaluation / 4) * 50;
+  function exploreMove(from: string, to: string) {
+    const next = new Chess(shownBoard.fen());
+    try {
+      const movingPiece = next.get(from as any);
+      const promotion = movingPiece?.type === "p" && (to[1] === "1" || to[1] === "8") ? "q" : undefined;
+      next.move({ from, to, promotion });
+    } catch {
+      return false;
+    }
+    setExplorationBoard(next);
+    setExplorationAnalysis(null);
+    setExplorationPending(true);
+    setExplorationError("");
+    const requestId = ++explorationRequest.current;
+    api.post(`/games/${id}/position-analysis`, { fen: next.fen() })
+      .then(({ data }) => {
+        if (requestId !== explorationRequest.current) return;
+        setExplorationAnalysis(data);
+        setExplorationPending(false);
+      })
+      .catch((error) => {
+        if (requestId !== explorationRequest.current) return;
+        setExplorationPending(false);
+        setExplorationError(error.response?.data?.detail || "Position analysis failed");
+      });
+    return true;
+  }
   const evalPoints = game.moves
     .filter((m) => m.analysis)
     .map((m) => ({
@@ -682,31 +796,57 @@ function Review({ onLoad }: { onLoad: (id: string) => Promise<Game> }) {
         <section className="board-area">
           <div className="board-meta">
             <span className="side-tag">
-              <i /> {game.black_player} <small>(Black)</small>
+              <i className={orientation === "black" ? "white-dot" : ""} />
+              {orientation === "white" ? game.black_player : game.white_player}
+              <small>({orientation === "white" ? "Black" : "White"})</small>
             </span>
-            <span className="rating-placeholder">—</span>
+            <button
+              className="flip-control"
+              onClick={() => setOrientation((current) => current === "white" ? "black" : "white")}
+              aria-label="Flip board orientation"
+              title="Flip board"
+            >
+              <ArrowLeftRight size={14} /> Flip board
+            </button>
           </div>
-          <div className="board-shell">
-            <div className="eval-bar">
-              <span />
+          <div className="board-shell" ref={boardShellRef}>
+            <div className="eval-track" title="Evaluation from White’s perspective">
+              <span className="eval-readout">{shownEvaluationLabel}</span>
+              <div className="eval-bar">
+                <span style={{ height: `${shownWhiteAdvantage}%` }} />
+              </div>
             </div>
             <div className="chessboard">
               <Chessboard
-                position={board.fen()}
-                arePiecesDraggable={false}
-                boardWidth={Math.min(
-                  620,
-                  typeof window !== "undefined" ? window.innerWidth - 70 : 620,
-                )}
+                position={shownBoard.fen()}
+                boardOrientation={orientation}
+                arePiecesDraggable={true}
+                onPieceDrop={exploreMove}
+                boardWidth={boardWidth}
+                promotionDialogVariant="vertical"
+                customArrows={customArrows as any}
                 customDarkSquareStyle={{ backgroundColor: "#718b76" }}
                 customLightSquareStyle={{ backgroundColor: "#e8e3d5" }}
               />
             </div>
           </div>
+          {explorationBoard && (
+            <div className="explore-status" aria-live="polite">
+              {explorationPending ? "Analyzing this position…" : explorationError || "Exploration position · drag another piece to continue"}
+              <button className="text-link" onClick={() => {
+                explorationRequest.current += 1;
+                setExplorationBoard(null);
+                setExplorationAnalysis(null);
+                setExplorationPending(false);
+                setExplorationError("");
+              }}>Return to game</button>
+            </div>
+          )}
           <div className="board-meta">
             <span className="side-tag">
-              <i className="white-dot" /> {game.white_player}{" "}
-              <small>(White)</small>
+              <i className={orientation === "white" ? "white-dot" : ""} />
+              {orientation === "white" ? game.white_player : game.black_player}{" "}
+              <small>({orientation === "white" ? "White" : "Black"})</small>
             </span>
             <span className="rating-placeholder">—</span>
           </div>
@@ -720,20 +860,24 @@ function Review({ onLoad }: { onLoad: (id: string) => Promise<Game> }) {
             </button>
             <button
               className="control-btn"
-              onClick={() => setIdx(Math.max(0, idx - 1))}
-              title="Previous"
+              onClick={() => setIdx((current) => Math.max(0, current - 1))}
+              disabled={idx === 0}
+              title="Previous move (←)"
+              aria-label="Previous move"
             >
               ◀
             </button>
             <span>
               {idx === 0
                 ? "Starting position"
-                : `Move ${Math.ceil(idx / 2)}${idx % 2 ? "…" : "…"}`}
+                : `After ${game.moves[idx - 1].san} · ${Math.ceil(idx / 2)}.${idx % 2 ? " Black" : " White"} to move`}
             </span>
             <button
               className="control-btn"
-              onClick={() => setIdx(Math.min(game.moves.length, idx + 1))}
-              title="Next"
+              onClick={() => setIdx((current) => Math.min(game.moves.length, current + 1))}
+              disabled={idx === game.moves.length}
+              title="Next move (→)"
+              aria-label="Next move"
             >
               ▶
             </button>
@@ -895,20 +1039,55 @@ function Review({ onLoad }: { onLoad: (id: string) => Promise<Game> }) {
               </div>
             )}
             <div className="analysis-content">
-              {selected?.analysis ? (
+              {explorationBoard ? (
+                explorationPending ? (
+                  <div className="analysis-empty">Stockfish is evaluating your position…</div>
+                ) : explorationError ? (
+                  <div className="analysis-empty">{explorationError}</div>
+                ) : explorationAnalysis ? (
+                  <>
+                    <div className="eval-score">
+                      {shownEvaluationLabel}
+                      <span>White eval · explored position</span>
+                    </div>
+                    <div className="best-move missed-best">
+                      <div className="move-comparison-side recommended">
+                        <span>STOCKFISH BEST · FOLLOW THE ARROW</span>
+                        <b>{explorationAnalysis.best_move_uci || "Game over"}</b>
+                      </div>
+                    </div>
+                    <div className="pv">
+                      <span>PRINCIPAL VARIATION</span>
+                      <b>{explorationAnalysis.principal_variation?.join(" ") || "—"}</b>
+                    </div>
+                  </>
+                ) : (
+                  <div className="analysis-empty">Make a legal move to analyze this position.</div>
+                )
+              ) : selected?.analysis ? (
                 <>
                   <div className="eval-score">
-                    {selected.analysis.evaluation_after > 0 ? "+" : ""}
-                    {selected.analysis.evaluation_after.toFixed(2)}{" "}
-                    <span>after {selected.san}</span>
+                    {evaluationLabel}
+                    <span>White eval after {selected.san}</span>
                   </div>
-                  <div className="best-move">
-                    <span>Best move</span>
-                    <b>{selected.analysis.best_move_uci || "—"}</b>
+                  <div className={`best-move ${playedBestMove ? "played-best" : "missed-best"}`}>
+                    <div className="move-comparison-side">
+                      <span>PLAYED</span>
+                      <b>{selected.san}</b>
+                    </div>
+                    {!playedBestMove && (
+                      <>
+                        <ArrowRight size={14} />
+                        <div className="move-comparison-side recommended">
+                          <span>STOCKFISH BEST</span>
+                          <b>{bestMoveSan || "—"}</b>
+                        </div>
+                      </>
+                    )}
                     <i
                       className={`quality ${selected.analysis.classification.toLowerCase()}`}
                     />
-                    <small>{selected.analysis.classification}</small>
+                    <small>{playedBestMove ? "Best move" : selected.analysis.classification}</small>
                   </div>
                   <div className="pv">
                     <span>PRINCIPAL VARIATION</span>
@@ -935,6 +1114,10 @@ function Review({ onLoad }: { onLoad: (id: string) => Promise<Game> }) {
             </div>
           </div>
           <div className="accuracy-panel">
+            <div className="accuracy-heading">
+              <span>PLAYER ACCURACY</span>
+              {!game.analysis_summary && <small>Available after analysis completes</small>}
+            </div>
             <div>
               <span>WHITE ACCURACY</span>
               <b>

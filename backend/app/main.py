@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 import jwt
+import chess
 from fastapi import FastAPI, Depends, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import select, func
@@ -8,8 +9,9 @@ from pwdlib import PasswordHash
 from app.core.config import settings
 from app.db import Base, engine, get_db
 from app.models import User, Game, Move, AnalysisJob, MoveAnalysis, GameAnalysis
-from app.schemas import Register, Login, ImportGame
+from app.schemas import Register, Login, ImportGame, PositionAnalysisRequest
 from app.services.pgn import parse_pgn
+from app.engine.stockfish import analyze_position
 
 app = FastAPI(title="Chess Review API", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
@@ -77,6 +79,15 @@ def get_game(game_id: str, db: Session = Depends(get_db), user: User = Depends(c
     analysis_by_move = {m.move_id: {"evaluation_before": m.evaluation_before, "evaluation_after": m.evaluation_after, "centipawn_loss": m.centipawn_loss, "classification": m.classification, "best_move_uci": m.best_move_uci, "principal_variation": m.principal_variation} for m in rows}
     summary = db.scalar(select(GameAnalysis).where(GameAnalysis.game_id == g.id).order_by(GameAnalysis.created_at.desc()))
     return {"id": g.id, "white_player": g.white_player, "black_player": g.black_player, "result": g.result, "event": g.event, "played_at": g.played_at, "initial_fen": g.initial_fen, "analysis_summary": {"accuracy_white": summary.accuracy_white, "accuracy_black": summary.accuracy_black, "inaccuracies": summary.inaccuracies, "mistakes": summary.mistakes, "blunders": summary.blunders} if summary else None, "moves": [{"id": m.id, "ply": m.ply, "move_number": m.move_number, "color": m.color, "san": m.san, "uci": m.uci, "fen_after": m.fen_after, "analysis": analysis_by_move.get(m.id)} for m in g.moves]}
+
+@app.post("/api/games/{game_id}/position-analysis")
+def position_analysis(game_id: str, data: PositionAnalysisRequest, db: Session = Depends(get_db), user: User = Depends(current_user)):
+    owned_game(game_id, user, db)
+    try:
+        chess.Board(data.fen)
+        return analyze_position(data.fen)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 @app.put("/api/games/{game_id}")
 def replace_game(game_id: str, data: ImportGame, db: Session = Depends(get_db), user: User = Depends(current_user)):

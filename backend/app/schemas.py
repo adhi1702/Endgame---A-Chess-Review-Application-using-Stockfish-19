@@ -12,6 +12,9 @@ class Login(BaseModel):
 class ImportGame(BaseModel):
     pgn: str = Field(min_length=10, max_length=500_000)
 
+class PositionAnalysisRequest(BaseModel):
+    fen: str = Field(min_length=10, max_length=100)
+
 class GameOut(BaseModel):
     id: str
     white_player: str
