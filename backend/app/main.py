@@ -1,4 +1,6 @@
 from datetime import datetime, timedelta, timezone
+import logging
+import threading
 import jwt
 import chess
 from fastapi import FastAPI, Depends, HTTPException, Header, Query
@@ -12,15 +14,52 @@ from app.models import User, Game, Move, AnalysisJob, MoveAnalysis, GameAnalysis
 from app.schemas import Register, Login, ImportGame, PositionAnalysisRequest
 from app.services.pgn import parse_pgn
 from app.engine.stockfish import analyze_position
+from app.worker import recover_interrupted_jobs, run_once
 
 app = FastAPI(title="Chess Review API", version="0.1.0")
 app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 password_hash = PasswordHash.recommended()
+logger = logging.getLogger("analysis-worker")
+worker_stop = threading.Event()
+worker_wakeup = threading.Event()
+worker_thread: threading.Thread | None = None
+
+
+def _consume_analysis_jobs():
+    while not worker_stop.is_set():
+        worker_wakeup.clear()
+        try:
+            worked = run_once()
+        except Exception:
+            logger.exception("Analysis worker loop failed")
+            worked = False
+        if not worked:
+            worker_wakeup.wait(timeout=2)
 
 @app.on_event("startup")
 def startup():
-    # Schema lifecycle is managed explicitly by Alembic migrations.
-    pass
+    # Schema lifecycle is managed explicitly by Alembic migrations. Start the
+    # job consumer with the API so local runs and single-service deployments do
+    # not depend on someone remembering a separate worker command.
+    global worker_thread
+    worker_stop.clear()
+    worker_wakeup.set()
+    recover_interrupted_jobs()
+    if not worker_thread or not worker_thread.is_alive():
+        worker_thread = threading.Thread(
+            target=_consume_analysis_jobs,
+            name="analysis-worker",
+            daemon=True,
+        )
+        worker_thread.start()
+
+
+@app.on_event("shutdown")
+def shutdown():
+    worker_stop.set()
+    worker_wakeup.set()
+    if worker_thread and worker_thread.is_alive():
+        worker_thread.join(timeout=5)
 
 def current_user(authorization: str | None = Header(default=None), db: Session = Depends(get_db)):
     if not authorization or not authorization.startswith("Bearer "): raise HTTPException(401, "Authentication required")
@@ -113,6 +152,7 @@ def queue_analysis(game_id: str, db: Session = Depends(get_db), user: User = Dep
     if active_job:
         return {"id": active_job.id, "status": active_job.status, "depth": active_job.depth, "progress": active_job.progress}
     job = AnalysisJob(game_id=g.id, depth=settings.engine_depth); db.add(job); db.commit(); db.refresh(job)
+    worker_wakeup.set()
     return {"id": job.id, "status": job.status, "depth": job.depth}
 
 @app.get("/api/analysis-jobs/{job_id}")

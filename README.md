@@ -46,13 +46,12 @@ SQLite is used by default, so PostgreSQL and Docker are optional for local use.
    uvicorn app.main:app --reload
    ```
 
-5. In another terminal, start the analysis worker from `backend` with the virtual environment enabled: `python -m app.worker`.
-6. Start the frontend: `cd frontend && npm install && npm run dev`.
-7. Open http://localhost:5173. The API runs at http://localhost:8000 and its interactive docs are at `/docs`.
+5. Start the frontend: `cd frontend && npm install && npm run dev`.
+6. Open http://localhost:5173. The API runs at http://localhost:8000 and its interactive docs are at `/docs`.
 
 ## Engine configuration
 
-Set `STOCKFISH_PATH`, `ENGINE_THREADS`, `ENGINE_HASH_MB` and `ENGINE_DEPTH` in `.env`. Defaults are intentionally conservative. The engine runs in the dedicated worker and analysis requests are queued in SQLite. Stockfish is installed locally and is not bundled with this repository. PostgreSQL can be used by changing `DATABASE_URL` and installing its service separately.
+Set `STOCKFISH_PATH`, `ENGINE_THREADS`, `ENGINE_HASH_MB` and `ENGINE_DEPTH` in `.env`. Defaults are intentionally conservative. The API starts its analysis worker automatically; no separate worker terminal is needed. Jobs left running by a stopped process are requeued on startup, and an inter-process lock prevents multiple API or standalone worker processes from claiming the same job. Stockfish is installed locally and is not bundled with this repository. PostgreSQL can be used by changing `DATABASE_URL` and installing its service separately.
 
 ## API overview
 
@@ -66,7 +65,7 @@ Every game and job endpoint requires `Authorization: Bearer <token>` and checks 
 
 ## Review scores
 
-Move loss is measured in centipawns from the perspective of the player who made the move, comparing the best score for the pre-move position with the played continuation. Mate scores are mapped to a large centipawn scale for classification. Current default loss bands are Best ≤10, Excellent ≤30, Good ≤80, Inaccuracy ≤150, Mistake ≤300 and Blunder >300 cp. The summary accuracy is a simple, documented heuristic (`100 - average centipawn loss / 10`, clamped to 0–100); it is a review aid, not an official chess rating.
+Move loss is measured in centipawns from the perspective of the player who made the move, comparing the best score for the pre-move position with the played continuation. Standard labels use these default bands: Best ≤10, Excellent ≤30, Good ≤80, Inaccuracy ≤150, Mistake ≤300 and Blunder >300 cp. Book marks moves in the bundled common opening lines. Brilliant marks a best move that offers a capturable non-pawn piece without meaningful evaluation loss; Great marks a best move with a large gap over the engine's second choice. Miss marks a 1–3 pawn loss from a position where the mover was already winning. These additional labels are heuristics, not official chess ratings. The summary accuracy is a simple heuristic (`100 - average centipawn loss / 10`, clamped to 0–100).
 
 ## Current scope
 

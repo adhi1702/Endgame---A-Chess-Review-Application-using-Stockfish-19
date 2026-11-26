@@ -788,7 +788,9 @@ function Review({ onLoad }: { onLoad: (id: string) => Promise<Game> }) {
             <Activity size={16} />
             {job?.status === "queued" || job?.status === "running"
               ? "Analysis queued"
-              : "Analyze game"}
+              : game.analysis_summary || job?.status === "completed"
+                ? "Reanalyze game"
+                : "Analyze game"}
           </button>
         </div>
       </div>
@@ -975,25 +977,27 @@ function Review({ onLoad }: { onLoad: (id: string) => Promise<Game> }) {
                       <span className="move-no">{row + 1}.</span>
                       <button
                         className={idx === w.ply ? "move-san active" : ""}
+                        title={w.analysis ? `${w.san} · ${w.analysis.classification}` : w.san}
                         onClick={() => setIdx(w.ply)}
                       >
                         {w.san}
                         {w.analysis && (
-                          <i
-                            className={`quality ${w.analysis.classification.toLowerCase()}`}
-                          />
+                          <span className={`move-quality-label ${w.analysis.classification.toLowerCase()}`}>
+                            {w.analysis.classification}
+                          </span>
                         )}
                       </button>
                       {b && (
                         <button
                           className={idx === b.ply ? "move-san active" : ""}
+                          title={b.analysis ? `${b.san} · ${b.analysis.classification}` : b.san}
                           onClick={() => setIdx(b.ply)}
                         >
                           {b.san}
                           {b.analysis && (
-                            <i
-                              className={`quality ${b.analysis.classification.toLowerCase()}`}
-                            />
+                            <span className={`move-quality-label ${b.analysis.classification.toLowerCase()}`}>
+                              {b.analysis.classification}
+                            </span>
                           )}
                         </button>
                       )}
@@ -1003,15 +1007,11 @@ function Review({ onLoad }: { onLoad: (id: string) => Promise<Game> }) {
               )}
             </div>
             <div className="move-legend">
-              <span>
-                <i className="quality best" /> Best
-              </span>
-              <span>
-                <i className="quality inaccuracy" /> Inaccuracy
-              </span>
-              <span>
-                <i className="quality blunder" /> Blunder
-              </span>
+              {["Book", "Brilliant", "Great", "Best", "Excellent", "Good", "Miss", "Inaccuracy", "Mistake", "Blunder"].map((label) => (
+                <span key={label}>
+                  <i className={`quality ${label.toLowerCase()}`} /> {label}
+                </span>
+              ))}
             </div>
           </div>
           <div className="panel engine-analysis">
@@ -1028,7 +1028,7 @@ function Review({ onLoad }: { onLoad: (id: string) => Promise<Game> }) {
             {job && (
               <div className="job-state">
                 {job.status === "queued"
-                  ? "Waiting for analysis worker…"
+                  ? "Analysis queued · starting shortly…"
                   : job.status === "running"
                     ? job.progress
                       ? `Analyzing · ${job.progress}%`

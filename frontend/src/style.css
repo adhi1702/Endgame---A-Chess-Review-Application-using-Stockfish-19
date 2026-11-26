@@ -774,14 +774,55 @@ header {
 }
 .move-san {
   justify-self: start;
+  max-width: 100%;
   min-width: 58px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
   border: 0;
   border-radius: 4px;
-  padding: 5px 8px;
+  padding: 5px 5px;
   background: transparent;
   color: #b9c2c4;
   text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
   font: 11px "DM Mono";
+}
+.move-quality-label {
+  min-width: 0;
+  overflow: hidden;
+  color: #91ab96;
+  font: 700 7px/1 "DM Sans", sans-serif;
+  letter-spacing: -0.2px;
+  text-overflow: clip;
+  text-transform: uppercase;
+}
+.move-quality-label.book {
+  color: #82b4d0;
+}
+.move-quality-label.brilliant {
+  color: #c7a5ee;
+}
+.move-quality-label.great {
+  color: #8fc5db;
+}
+.move-quality-label.best,
+.move-quality-label.excellent {
+  color: #9bc89e;
+}
+.move-quality-label.good {
+  color: #a3b7a8;
+}
+.move-quality-label.miss,
+.move-quality-label.inaccuracy {
+  color: #e2c276;
+}
+.move-quality-label.mistake {
+  color: #df995f;
+}
+.move-quality-label.blunder {
+  color: #d46e6e;
 }
 .move-san:hover,
 .move-san.active {
@@ -810,14 +851,28 @@ header {
 .quality.blunder {
   background: #d46e6e;
 }
+.quality.book {
+  background: #82b4d0;
+}
+.quality.brilliant {
+  background: #c7a5ee;
+}
+.quality.great {
+  background: #8fc5db;
+}
+.quality.miss {
+  background: #e2c276;
+}
 .move-legend {
-  height: 37px;
+  min-height: 37px;
+  padding: 7px 0;
   border-top: 1px solid #242e36;
   display: flex;
   align-items: center;
-  gap: 14px;
+  flex-wrap: wrap;
+  gap: 6px 11px;
   color: #87928e;
-  font-size: 9px;
+  font-size: 8px;
 }
 .move-legend span {
   display: flex;

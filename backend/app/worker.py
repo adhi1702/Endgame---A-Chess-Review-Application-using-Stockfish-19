@@ -1,7 +1,10 @@
 import time
 import logging
+import fcntl
+import os
+import tempfile
 from datetime import datetime, timezone
-from sqlalchemy import select
+from sqlalchemy import select, update
 from app.db import SessionLocal
 from app.models import AnalysisJob, Game, MoveAnalysis, GameAnalysis
 from app.engine.stockfish import analyze_game
@@ -9,13 +12,73 @@ from app.engine.stockfish import analyze_game
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("analysis-worker")
 
-def run_once():
-    db = SessionLocal()
+
+def _worker_lock_file():
+    path = os.path.join(tempfile.gettempdir(), "stockfish-review-worker.lock")
+    return open(path, "w")
+
+
+def recover_interrupted_jobs():
+    """Requeue jobs left running by a stopped API/worker process."""
+    lock_file = _worker_lock_file()
     try:
-        job = db.scalar(select(AnalysisJob).where(AnalysisJob.status == "queued").order_by(AnalysisJob.created_at).with_for_update(skip_locked=True))
-        if not job: return False
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return 0
+        db = SessionLocal()
+        try:
+            recovered = db.execute(
+                update(AnalysisJob)
+                .where(AnalysisJob.status == "running")
+                .values(status="queued", progress=0, started_at=None, error_message=None)
+            )
+            db.commit()
+            if recovered.rowcount:
+                logger.warning("Requeued %s interrupted analysis job(s)", recovered.rowcount)
+            return recovered.rowcount or 0
+        finally:
+            db.close()
+    finally:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        lock_file.close()
+
+def run_once():
+    lock_file = _worker_lock_file()
+    try:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        return _run_once_locked()
+    finally:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        lock_file.close()
+
+
+def _run_once_locked():
+    db = SessionLocal()
+    job = None
+    try:
+        job_id = db.scalar(
+            select(AnalysisJob.id)
+            .where(AnalysisJob.status == "queued")
+            .order_by(AnalysisJob.created_at)
+            .limit(1)
+        )
+        if not job_id:
+            return False
+        # Claim with a conditional UPDATE. This also works on SQLite, where
+        # SELECT ... FOR UPDATE is ignored, and avoids duplicate processing if
+        # the API's built-in worker and a standalone worker run together.
+        claimed = db.execute(
+            update(AnalysisJob)
+            .where(AnalysisJob.id == job_id, AnalysisJob.status == "queued")
+            .values(status="running", started_at=datetime.now(timezone.utc))
+        )
+        db.commit()
+        if claimed.rowcount != 1:
+            return True
+        job = db.get(AnalysisJob, job_id)
         logger.info("Starting analysis job %s for game %s at depth %s", job.id, job.game_id, job.depth)
-        job.status = "running"; job.started_at = datetime.now(timezone.utc); db.commit(); db.refresh(job)
+        db.refresh(job)
         game = db.get(Game, job.game_id)
         records = analyze_game(game, job, db)
         for record in records: db.add(MoveAnalysis(**record))
@@ -31,7 +94,7 @@ def run_once():
     except Exception as exc:
         db.rollback()
         logger.exception("Analysis job failed: %s", exc)
-        if 'job' in locals() and job:
+        if job:
             job.status = "failed"; job.error_message = str(exc)[:2000]; job.completed_at = datetime.now(timezone.utc); db.commit()
         return True
     finally: db.close()
