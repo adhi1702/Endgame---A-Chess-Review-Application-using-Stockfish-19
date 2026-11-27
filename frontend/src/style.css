@@ -142,7 +142,7 @@ a {
 }
 .sidebar nav > a:hover,
 .sidebar-bottom > a:hover,
-.sidebar nav > a:first-child {
+.sidebar nav > a.active {
   background: #1c2522;
   color: #cce0cf;
 }
@@ -1338,7 +1338,7 @@ header {
   background: radial-gradient(ellipse at 51% 35%, #19231e 0%, #0d1117 55%);
 }
 .auth-card {
-  width: min(390px, 100%);
+  width: min(450px, 100%);
   padding: 28px;
   border: 1px solid #2b3633;
   border-radius: 12px;
@@ -1380,6 +1380,27 @@ header {
 .auth-card input:focus {
   border-color: #78927e;
 }
+.auth-card textarea {
+  width: 100%; min-height: 95px; resize: vertical; border: 1px solid #303c40;
+  border-radius: 5px; background: #0e1419; color: #d8e0dc; padding: 10px;
+  font: 12px "DM Sans"; outline: none;
+}
+.google-signin { display: flex; justify-content: center; margin: 18px 0; min-height: 42px; }
+.settings-card { max-width: 620px; display: grid; gap: 16px; padding: 24px; }
+.game-filters {
+  display: flex;
+  gap: 10px;
+  padding: 16px 18px 0;
+  margin-bottom: 20px;
+}
+.game-filters input, .game-filters select { min-height: 36px; color: #d8e0dc; background: #0e1419; border: 1px solid #303c40; border-radius: 5px; padding: 7px 10px; }
+.game-filters input { flex: 1; min-width: 120px; }
+@media (max-width: 640px) { .game-filters { flex-direction: column; } }
+.settings-card h2 { margin: 0; }
+.settings-card > label { display: grid; gap: 7px; color: #aab5ae; font-size: 12px; }
+.settings-card > label.checkbox-label { display: flex; align-items: center; gap: 9px; }
+.settings-card > label.checkbox-label input { width: auto; }
+.settings-card input, .settings-card textarea { width: 100%; padding: 11px; color: #e9edf0; background: #0e1419; border: 1px solid #303c40; border-radius: 5px; }
 .auth-submit {
   width: 100%;
   margin-top: 4px;

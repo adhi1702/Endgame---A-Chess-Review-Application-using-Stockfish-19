@@ -7,7 +7,8 @@ from datetime import datetime, timezone
 from sqlalchemy import select, update
 from app.db import SessionLocal
 from app.models import AnalysisJob, Game, MoveAnalysis, GameAnalysis
-from app.engine.stockfish import analyze_game
+from app.engine.stockfish import analyze_game, engine_version
+from app.core.config import settings
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("analysis-worker")
@@ -31,7 +32,7 @@ def recover_interrupted_jobs():
             recovered = db.execute(
                 update(AnalysisJob)
                 .where(AnalysisJob.status == "running")
-                .values(status="queued", progress=0, started_at=None, error_message=None)
+        .values(status="queued", analysis_status="queued", progress=0, started_at=None, completed_at=None, error_message=None)
             )
             db.commit()
             if recovered.rowcount:
@@ -71,7 +72,7 @@ def _run_once_locked():
         claimed = db.execute(
             update(AnalysisJob)
             .where(AnalysisJob.id == job_id, AnalysisJob.status == "queued")
-            .values(status="running", started_at=datetime.now(timezone.utc))
+            .values(status="running", analysis_status="running", started_at=datetime.now(timezone.utc))
         )
         db.commit()
         if claimed.rowcount != 1:
@@ -80,22 +81,28 @@ def _run_once_locked():
         logger.info("Starting analysis job %s for game %s at depth %s", job.id, job.game_id, job.depth)
         db.refresh(job)
         game = db.get(Game, job.game_id)
+        job.total_moves = len(game.moves)
+        job.engine_config = {"threads": settings.engine_threads,
+                             "hash_mb": settings.engine_hash_mb,
+                             "multipv": settings.engine_multipv}
+        job.engine_version = engine_version()
+        db.commit()
         records = analyze_game(game, job, db)
         for record in records: db.add(MoveAnalysis(**record))
         losses = [r["centipawn_loss"] for r in records]
-        white = [r["centipawn_loss"] for i, r in enumerate(records) if i % 2 == 0]
-        black = [r["centipawn_loss"] for i, r in enumerate(records) if i % 2 == 1]
+        white = [r["centipawn_loss"] for r, move in zip(records, game.moves) if move.color == "white"]
+        black = [r["centipawn_loss"] for r, move in zip(records, game.moves) if move.color == "black"]
         # Heuristic review score (0-100), based on average centipawn loss; not a chess rating.
         accuracy = lambda values: round(max(0, min(100, 100 - sum(values)/len(values)/10)), 1) if values else None
-        db.add(GameAnalysis(game_id=game.id, job_id=job.id, total_moves=len(records), inaccuracies=sum(r["classification"] == "Inaccuracy" for r in records), mistakes=sum(r["classification"] == "Mistake" for r in records), blunders=sum(r["classification"] == "Blunder" for r in records), accuracy_white=accuracy(white), accuracy_black=accuracy(black)))
-        job.status = "completed"; job.progress = 100; job.completed_at = datetime.now(timezone.utc); db.commit()
+        db.add(GameAnalysis(game_id=game.id, job_id=job.id, total_moves=len(records), inaccuracies=sum(r["classification"] == "Inaccuracy" for r in records), mistakes=sum(r["classification"] == "Mistake" for r in records), blunders=sum(r["classification"] == "Blunder" for r in records), accuracy_white=accuracy(white), accuracy_black=accuracy(black), white_cpl=sum(white)/len(white) if white else None, black_cpl=sum(black)/len(black) if black else None))
+        job.status = "completed"; job.analysis_status = "completed"; job.progress = 100; job.completed_at = datetime.now(timezone.utc); db.commit()
         logger.info("Completed analysis job %s", job.id)
         return True
     except Exception as exc:
         db.rollback()
         logger.exception("Analysis job failed: %s", exc)
         if job:
-            job.status = "failed"; job.error_message = str(exc)[:2000]; job.completed_at = datetime.now(timezone.utc); db.commit()
+            job.status = "failed"; job.analysis_status = "failed"; job.error_message = str(exc)[:2000]; job.completed_at = datetime.now(timezone.utc); db.commit()
         return True
     finally: db.close()
 

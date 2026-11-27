@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link, Route, Routes, useNavigate, useParams } from "react-router-dom";
+import { Link, NavLink, Route, Routes, useNavigate, useParams } from "react-router-dom";
 import { Chess } from "chess.js";
 import { Chessboard } from "react-chessboard";
 import {
@@ -13,6 +13,7 @@ import {
   CircleHelp,
   CloudUpload,
   FileText,
+  LogOut,
   LayoutDashboard,
   Menu,
   Plus,
@@ -42,21 +43,37 @@ function App() {
     [importOpen, setImportOpen] = useState(false),
     [notice, setNotice] = useState(""),
     [authMessage, setAuthMessage] = useState(""),
-    [authenticated, setAuthenticated] = useState(
-      !!localStorage.getItem("token"),
-    );
+    [authenticated, setAuthenticated] = useState(false),
+    [authChecking, setAuthChecking] = useState(true),
+    [currentUser, setCurrentUser] = useState<{ display_name: string; email: string } | null>(null),
+    [chessComUsername, setChessComUsername] = useState(""),
+    [chessComStatus, setChessComStatus] = useState(""),
+    [chessComConnected, setChessComConnected] = useState(false);
   const navigate = useNavigate();
   const refresh = () => api.get("/games").then((r) => setGames(r.data.items));
   useEffect(() => {
+    api.get("/v1/auth/me").then(({ data }) => { if (data?.user) { setCurrentUser(data.user); setAuthenticated(true); } })
+      .catch(() => setAuthenticated(false)).finally(() => setAuthChecking(false));
+  }, []);
+  useEffect(() => {
     const expired = () => {
       setAuthenticated(false);
+      setCurrentUser(null);
       setAuthMessage("Your saved sign-in expired. Please sign in again.");
     };
     window.addEventListener("chess-auth-expired", expired);
     return () => window.removeEventListener("chess-auth-expired", expired);
   }, []);
   useEffect(() => {
-    if (authenticated) refresh().catch(() => {});
+    const refreshCsrf = () => { api.get("/v1/auth/me").catch(() => {}); };
+    window.addEventListener("chess-csrf-refresh", refreshCsrf);
+    return () => window.removeEventListener("chess-csrf-refresh", refreshCsrf);
+  }, []);
+  useEffect(() => {
+    if (authenticated) {
+      refresh().catch(() => {});
+      api.get("/v1/integrations/chesscom").then(({ data }) => setChessComConnected(data.connected)).catch(() => {});
+    }
   }, [authenticated]);
   const flash = (s: string) => {
     setNotice(s);
@@ -76,13 +93,14 @@ function App() {
       setLoading(false);
     }
   }
+  if (authChecking) return <div className="auth-screen"><div className="auth-card">Checking your session…</div></div>;
   if (!authenticated)
     return (
       <Auth
         message={authMessage}
         onAuth={() => {
-          setAuthenticated(true);
-          setAuthMessage("");
+          api.get("/v1/auth/me").then(({ data }) => { if (!data?.user) throw new Error("No session was created"); setCurrentUser(data.user); setAuthenticated(true); setAuthMessage(""); })
+            .catch(() => setAuthMessage("Signed in, but the session could not be loaded. Please try again."));
         }}
       />
     );
@@ -107,18 +125,20 @@ function App() {
         </div>
         <div className="nav-label">MENU</div>
         <nav>
-          <Link to="/">
+          <NavLink to="/" end>
             <LayoutDashboard />
             Overview
-          </Link>
-          <Link to="/games">
+          </NavLink>
+          <NavLink to="/games">
             <BookOpen />
             My games<span className="nav-count">{games.length}</span>
-          </Link>
-          <Link to="/stats">
+          </NavLink>
+          <NavLink to="/stats">
             <BarChart3 />
             Statistics
-          </Link>
+          </NavLink>
+          <NavLink to="/settings"><Settings /> Settings</NavLink>
+          <NavLink to="/profile"><ShieldCheck /> Profile</NavLink>
         </nav>
         <div className="nav-label library-label">LIBRARY</div>
         <nav>
@@ -132,17 +152,13 @@ function App() {
             <CircleHelp />
             Help center
           </a>
-          <a>
-            <Settings />
-            Settings
-          </a>
           <div className="profile">
             <div className="avatar">A</div>
             <div>
-              <b>Adhithya</b>
+              <b>{currentUser?.display_name || "Player"}</b>
               <small>Account settings</small>
             </div>
-            <ChevronDown size={15} />
+            <button className="icon-btn" title="Sign out" onClick={async () => { try { await api.post("/v1/auth/logout"); } finally { setAuthenticated(false); setCurrentUser(null); } }}><LogOut size={15} /></button>
           </div>
         </div>
       </aside>
@@ -204,14 +220,10 @@ function App() {
           />
           <Route
             path="/stats"
-            element={
-              <Dashboard
-                games={games}
-                onImport={() => setImportOpen(true)}
-                onSelect={(id) => navigate(`/review/${id}`)}
-              />
-            }
+            element={<StatisticsPage />}
           />
+          <Route path="/settings" element={<SettingsPage connected={chessComConnected} username={chessComUsername} setUsername={setChessComUsername} status={chessComStatus} setStatus={setChessComStatus} onConnected={() => setChessComConnected(true)} />} />
+          <Route path="/profile" element={<section className="page"><div className="page-heading"><div><div className="eyebrow">YOUR ACCOUNT</div><h1>Profile</h1><p>{currentUser?.email}</p></div></div><ProfileEditor onSaved={(display_name) => setCurrentUser(currentUser ? {...currentUser, display_name} : null)} /></section>} />
         </Routes>
       </main>
       {importOpen && (
@@ -227,30 +239,57 @@ function App() {
 }
 
 function Auth({ onAuth, message }: { onAuth: () => void; message: string }) {
-  const [register, setRegister] = useState(false),
-    [username, setUsername] = useState(""),
-    [email, setEmail] = useState(""),
-    [password, setPassword] = useState(""),
-    [error, setError] = useState(""),
-    [busy, setBusy] = useState(false);
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
-    setBusy(true);
-    setError("");
-    try {
-      const { data } = await api.post(
-        register ? "/auth/register" : "/auth/login",
-        register ? { username, email, password } : { email, password },
-      );
-      localStorage.setItem("token", data.token);
-      onAuth();
-    } catch (e: any) {
-      setError(
-        e.response?.data?.detail || "Could not connect to the review server.",
-      );
-    } finally {
-      setBusy(false);
+  const clientId = import.meta.env.VITE_GOOGLE_CLIENT_ID || "";
+  const googleButton = useRef<HTMLDivElement>(null);
+  const [email, setEmail] = useState(""), [password, setPassword] = useState("");
+  const [error, setError] = useState(""), [busy, setBusy] = useState(false), [linkChallenge, setLinkChallenge] = useState("");
+  const [legacyLinkRequired, setLegacyLinkRequired] = useState(false);
+  const [credential, setCredential] = useState("");
+  useEffect(() => {
+    if (!clientId) return;
+    let cancelled = false;
+    const setup = () => {
+      if (cancelled || !window.google || !googleButton.current) return;
+      window.google.accounts.id.initialize({ client_id: clientId, callback: async ({ credential }) => {
+        setBusy(true); setError("");
+        try {
+          if (linkChallenge) setCredential(credential);
+          await api.post("/v1/auth/google", { credential, ...(linkChallenge ? { link_challenge: linkChallenge } : {}) });
+          setLinkChallenge(""); setCredential(""); setLegacyLinkRequired(false); onAuth();
+        }
+        catch (e: any) {
+          const detail = e.response?.data?.detail;
+          if (detail?.code === "legacy_account_link_required") { setLegacyLinkRequired(true); setError(detail.message); }
+          else if (detail?.code === "google_email_mismatch") { setError(detail.message); setLinkChallenge(""); }
+          else setError(typeof detail === "string" ? detail : detail?.message || "Google sign-in failed. Please try again.");
+        } finally { setBusy(false); }
+      }});
+      googleButton.current.replaceChildren();
+      window.google.accounts.id.renderButton(googleButton.current, { theme: "outline", size: "large", shape: "rectangular", text: "continue_with", width: 320 });
+    };
+    if (window.google) setup();
+    else {
+      let script = document.querySelector<HTMLScriptElement>('script[data-google-identity="true"]');
+      if (!script) { script = document.createElement("script"); script.src = "https://accounts.google.com/gsi/client"; script.async = true; script.defer = true; script.dataset.googleIdentity = "true"; document.head.appendChild(script); }
+      script.addEventListener("load", setup); if (window.google) setup();
     }
+    return () => { cancelled = true; };
+  }, [clientId, linkChallenge]);
+  async function startLink(e: React.FormEvent) {
+    e.preventDefault(); setBusy(true); setError("");
+    try {
+      const { data } = await api.post("/v1/auth/link/legacy", { email, password });
+      const challenge = data.link_challenge;
+      const currentCredential = credential;
+      setLinkChallenge(challenge); setPassword("");
+      if (!currentCredential) { setError("Account verified. Choose the matching Google account to finish linking."); window.google?.accounts.id.prompt(); return; }
+      const completed = await api.post("/v1/auth/google", {credential:currentCredential, link_challenge:challenge});
+      setCredential(""); setLinkChallenge(""); setLegacyLinkRequired(false);
+      if (!completed.data?.user) throw new Error("The session could not be created");
+      onAuth();
+    }
+    catch (e: any) { setError(typeof e.response?.data?.detail === "string" ? e.response.data.detail : e.response?.data?.detail?.message || "Could not verify the existing account."); }
+    finally { setBusy(false); }
   }
   return (
     <div className="auth-screen">
@@ -264,24 +303,16 @@ function Auth({ onAuth, message }: { onAuth: () => void; message: string }) {
           </span>
         </div>
         <div className="eyebrow">YOUR PRIVATE CHESS WORKSPACE</div>
-        <h1>{register ? "Create your account" : "Welcome back"}</h1>
+        <h1>Welcome to your chess review</h1>
         <p>Review your games with clear, local Stockfish analysis.</p>
         {message && <div className="auth-error">{message}</div>}
-        <form onSubmit={submit}>
-          {register && (
-            <label>
-              Username
-              <input
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                required
-                minLength={2}
-                autoComplete="username"
-              />
-            </label>
-          )}
+        {!clientId ? <div className="auth-error">Google sign-in needs a client ID. Set GOOGLE_CLIENT_ID and VITE_GOOGLE_CLIENT_ID in your local .env file.</div> : <div ref={googleButton} className="google-signin" />}
+        {error && <div className="auth-error">{error}</div>}
+        {linkChallenge && <button type="button" className="primary auth-submit" disabled={busy} onClick={() => { setError("Choose the Google account that uses the same email as your existing account."); window.google?.accounts.id.prompt(); }}>{busy ? "Please wait…" : "Continue with Google to finish linking"}</button>}
+        {legacyLinkRequired || linkChallenge ? (
+        <form onSubmit={startLink}>
           <label>
-            Email
+            Existing account email
             <input
               type="email"
               value={email}
@@ -297,27 +328,16 @@ function Auth({ onAuth, message }: { onAuth: () => void; message: string }) {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required
-              minLength={register ? 10 : 1}
-              autoComplete={register ? "new-password" : "current-password"}
+              minLength={1}
+              autoComplete="current-password"
             />
           </label>
-          {error && <div className="auth-error">{error}</div>}
-          <button className="primary auth-submit" disabled={busy}>
-            {busy ? "Please wait…" : register ? "Create account" : "Sign in"}{" "}
+          <button className="primary auth-submit" disabled={busy || !!linkChallenge}>
+            {busy ? "Please wait…" : linkChallenge ? "Account verified" : "Verify existing account"}{" "}
             <ArrowRight size={15} />
           </button>
         </form>
-        <button
-          className="auth-switch"
-          onClick={() => {
-            setRegister(!register);
-            setError("");
-          }}
-        >
-          {register
-            ? "Already have an account? Sign in"
-            : "New to Endgame? Create an account"}
-        </button>
+        ) : null}
         <div className="auth-privacy">
           <ShieldCheck size={14} /> Your games and analysis stay in your
           workspace.
@@ -326,6 +346,18 @@ function Auth({ onAuth, message }: { onAuth: () => void; message: string }) {
     </div>
   );
 }
+function SettingsPage({connected, username, setUsername, status, setStatus, onConnected}: {connected: boolean; username: string; setUsername: (value: string) => void; status: string; setStatus: (value: string) => void; onConnected: () => void}) {
+  const [prefs, setPrefs] = useState({default_analysis_depth:16, multipv:3, auto_analyze:false, auto_sync:true});
+  useEffect(() => { api.get("/v1/users/preferences").then(({data}) => setPrefs(data.preferences)).catch(() => {}); }, []);
+  return <section className="page"><div className="page-heading"><div><div className="eyebrow">PREFERENCES</div><h1>Settings</h1><p>Engine preferences and Chess.com imports.</p></div></div><div className="panel settings-card"><h2>Engine preferences</h2><label>Default depth<input type="number" min={8} max={30} value={prefs.default_analysis_depth} onChange={e => setPrefs({...prefs, default_analysis_depth:Number(e.target.value)})} /></label><label>Principal variations<input type="number" min={1} max={5} value={prefs.multipv} onChange={e => setPrefs({...prefs, multipv:Number(e.target.value)})} /></label><label className="checkbox-label"><input type="checkbox" checked={prefs.auto_analyze} onChange={e => setPrefs({...prefs, auto_analyze:e.target.checked})} /> Analyze imported games automatically</label><label className="checkbox-label"><input type="checkbox" checked={prefs.auto_sync} onChange={e => setPrefs({...prefs, auto_sync:e.target.checked})} /> Sync Chess.com every 12 hours</label><button className="primary" onClick={async () => { try { await api.patch("/v1/users/preferences", prefs); setStatus("Preferences saved."); } catch {setStatus("Could not save preferences.");} }}>Save preferences</button><h2>Chess.com account</h2>{connected ? <p>Chess.com account connected.</p> : <label>Chess.com username<input value={username} onChange={e => setUsername(e.target.value)} placeholder="username" /></label>}{!connected && <button className="primary" onClick={async () => { setStatus("Connecting…"); try { await api.post("/v1/integrations/chesscom", {username}); onConnected(); setStatus("Connected successfully."); } catch(e: any) { setStatus(e.response?.data?.detail || "Could not connect account."); } }}>Connect account</button>}{connected && <button className="primary" onClick={async () => { try { const {data} = await api.post("/v1/integrations/chesscom/sync", {sync_mode:"initial"}); setStatus(`Sync started (${data.id}). Refresh the game list in a moment.`); } catch(e: any) { setStatus(e.response?.data?.detail || "Could not start sync."); } }}>Import recent 3 months</button>}{status && <p>{status}</p>}</div></section>;
+}
+
+function ProfileEditor({onSaved}: {onSaved: (name: string) => void}) {
+  const [name, setName] = useState(""), [country, setCountry] = useState(""), [bio, setBio] = useState(""), [status, setStatus] = useState("");
+  useEffect(() => { api.get("/v1/users/profile").then(({data}) => {setName(data.profile.display_name || ""); setCountry(data.profile.country || ""); setBio(data.profile.bio || "");}).catch(() => setStatus("Could not load profile.")); }, []);
+  return <div className="panel settings-card"><label>Display name<input value={name} onChange={e => setName(e.target.value)} maxLength={100} /></label><label>Country<input value={country} onChange={e => setCountry(e.target.value)} maxLength={100} /></label><label>Bio<textarea value={bio} onChange={e => setBio(e.target.value)} maxLength={1000} /></label><button className="primary" onClick={async () => { try { await api.patch("/v1/users/profile", {display_name:name, country, bio}); onSaved(name); setStatus("Profile saved."); } catch {setStatus("Could not save profile.");} }}>{"Save profile"}</button>{status && <p>{status}</p>}</div>;
+}
+
 function Dashboard({
   games,
   onImport,
@@ -335,6 +367,8 @@ function Dashboard({
   onImport: () => void;
   onSelect: (id: string) => void;
 }) {
+  const [averageAccuracy, setAverageAccuracy] = useState<number | null>(null);
+  useEffect(() => { api.get("/v1/analytics").then(({data}) => setAverageAccuracy(data.average_accuracy)).catch(() => {}); }, []);
   return (
     <div className="page">
       <div className="page-heading">
@@ -375,8 +409,8 @@ function Dashboard({
         <Stat
           icon={<Activity />}
           label="Average accuracy"
-          value="—"
-          change="Available after analysis"
+          value={averageAccuracy == null ? "—" : `${averageAccuracy}%`}
+          change="Average across analyzed games"
         />
       </section>
       <section className="panel recent-panel">
@@ -466,6 +500,12 @@ function Dashboard({
     </div>
   );
 }
+function StatisticsPage() {
+  const [data, setData] = useState<any>(null);
+  useEffect(() => { Promise.all([api.get("/v1/analytics"), api.get("/v1/analytics/performance")]).then(([summary, performance]) => setData({...summary.data, ...performance.data})).catch(() => setData({error:"Could not load statistics."})); }, []);
+  return <section className="page"><div className="page-heading"><div><div className="eyebrow">YOUR PROGRESS</div><h1>Statistics</h1><p>Results, review coverage, and your game patterns.</p></div></div>{data?.error ? <div className="auth-error">{data.error}</div> : <><section className="stats-grid"><Stat icon={<BookOpen />} label="Total games" value={String(data?.total_games ?? "—")} change="In your library" /><Stat icon={<Activity />} label="Reviewed games" value={String(data?.reviewed_games ?? "—")} change="With completed analysis" /><Stat icon={<Target />} label="Average accuracy" value={data?.average_accuracy == null ? "—" : `${data.average_accuracy}%`} change="From completed reviews" /><Stat icon={<ArrowLeftRight />} label="Wins / draws / losses" value={data ? `${data.results.wins} / ${data.results.draws} / ${data.results.losses}` : "—"} change="Your results" /></section><section className="panel settings-card"><h2>Monthly performance</h2>{(data?.monthly || []).length ? data.monthly.map((row: any) => <div className="stat-change" key={row.month}>{row.month}: {row.games} games · {row.wins} wins · {row.draws} draws · {row.losses} losses</div>) : <p>Monthly performance will appear after you import games.</p>}<h2>Most frequent opponents</h2>{(data?.opponents || []).length ? data.opponents.map((row: any) => <div className="stat-change" key={row.name}>{row.name} · {row.games} games</div>) : <p>Opponent data will appear with your game history.</p>}<h2>Openings</h2>{(data?.openings || []).length ? data.openings.map((row: any) => <div className="stat-change" key={row.name}>{row.name} · {row.count}</div>) : <p>Opening data will appear when it is available in PGN headers.</p>}</section></>}</section>;
+}
+
 function Stat({
   icon,
   label,
@@ -499,6 +539,15 @@ function Games({
   onSelect: (id: string) => void;
   onDelete: (id: string) => void;
 }) {
+  const [query, setQuery] = useState("");
+  const [resultFilter, setResultFilter] = useState("");
+  const [sourceFilter, setSourceFilter] = useState("");
+  const [statusFilter, setStatusFilter] = useState("");
+  const filtered = games.filter((game) => {
+    const matchesText = !query || `${game.white_player} ${game.black_player} ${game.event} ${game.opening_name || ""}`.toLowerCase().includes(query.toLowerCase());
+    const userResult = game.result === "1/2-1/2" ? "draw" : ((game.user_color === "white" && game.result === "1-0") || (game.user_color === "black" && game.result === "0-1")) ? "win" : ((game.user_color === "white" && game.result === "0-1") || (game.user_color === "black" && game.result === "1-0")) ? "loss" : "unknown";
+    return matchesText && (!resultFilter || userResult === resultFilter) && (!sourceFilter || (game.source || "pgn") === sourceFilter);
+  });
   return (
     <div className="page">
       <div className="page-heading">
@@ -512,60 +561,61 @@ function Games({
         </button>
       </div>
       <section className="panel recent-panel">
-        <div className="panel-head">
-          <div>
-            <div className="eyebrow">ARCHIVE</div>
-            <h2>{games.length} games</h2>
-          </div>
+  <div className="game-filters"><input aria-label="Search games" placeholder="Search player, opening, event" value={query} onChange={e => setQuery(e.target.value)} /><select value={resultFilter} onChange={e => setResultFilter(e.target.value)}><option value="">All results</option><option value="win">Wins</option><option value="draw">Draws</option><option value="loss">Losses</option></select><select value={sourceFilter} onChange={e => setSourceFilter(e.target.value)}><option value="">All sources</option><option value="pgn">PGN import</option><option value="chesscom">Chess.com</option></select></div>
+  <div className="panel-head">
+    <div>
+      <div className="eyebrow">ARCHIVE</div>
+      <h2>{filtered.length} games</h2>
+    </div>
+  </div>
+  {filtered.length ? (
+    <div className="game-table">
+      <div className="table-row table-labels">
+        <span>GAME</span>
+        <span>RESULT</span>
+        <span>MOVES</span>
+        <span>DATE</span>
+        <span />
+      </div>
+      {filtered.map((g) => (
+        <div
+          className="table-row"
+          key={g.id}
+          onClick={() => onSelect(g.id)}
+        >
+          <span className="game-names">
+            <i className="piece-dot">♞</i>
+            <span>
+              <b>{g.white_player}</b>
+              <small>vs {g.black_player}</small>
+            </span>
+          </span>
+          <span className="result-chip">{g.result}</span>
+          <span>{g.move_count}</span>
+          <span>{g.played_at || "—"}</span>
+          <button
+            className="icon-btn delete"
+            title="Delete game"
+            onClick={(e) => {
+              e.stopPropagation();
+              onDelete(g.id);
+            }}
+          >
+            <Trash2 size={15} />
+          </button>
         </div>
-        {games.length ? (
-          <div className="game-table">
-            <div className="table-row table-labels">
-              <span>GAME</span>
-              <span>RESULT</span>
-              <span>MOVES</span>
-              <span>DATE</span>
-              <span />
-            </div>
-            {games.map((g) => (
-              <div
-                className="table-row"
-                key={g.id}
-                onClick={() => onSelect(g.id)}
-              >
-                <span className="game-names">
-                  <i className="piece-dot">♞</i>
-                  <span>
-                    <b>{g.white_player}</b>
-                    <small>vs {g.black_player}</small>
-                  </span>
-                </span>
-                <span className="result-chip">{g.result}</span>
-                <span>{g.move_count}</span>
-                <span>{g.played_at || "—"}</span>
-                <button
-                  className="icon-btn delete"
-                  title="Delete game"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onDelete(g.id);
-                  }}
-                >
-                  <Trash2 size={15} />
-                </button>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <div className="empty">
-            <h3>No games yet</h3>
-            <p>Import your first PGN game to begin.</p>
-            <button className="secondary" onClick={onImport}>
-              <Upload size={16} /> Import PGN
-            </button>
-          </div>
-        )}
-      </section>
+      ))}
+    </div>
+  ) : (
+    <div className="empty">
+      <h3>No games yet</h3>
+      <p>Import your first PGN game to begin.</p>
+      <button className="secondary" onClick={onImport}>
+        <Upload size={16} /> Import PGN
+      </button>
+    </div>
+  )}
+</section>
     </div>
   );
 }

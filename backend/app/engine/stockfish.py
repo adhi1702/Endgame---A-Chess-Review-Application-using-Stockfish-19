@@ -8,7 +8,6 @@ from app.core.config import settings
 from app.services.classification import classify_move
 from app.services.opening_book import is_book_move
 
-
 @contextmanager
 def _engine_lock():
     """Serialize UCI access across the API and background worker processes."""
@@ -19,6 +18,17 @@ def _engine_lock():
             yield
         finally:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+def engine_version():
+    try:
+        with _engine_lock():
+            engine = chess.engine.SimpleEngine.popen_uci(settings.stockfish_path)
+            try:
+                return str(engine.id.get("name", "Stockfish"))[-30:]
+            finally:
+                engine.quit()
+    except Exception:
+        return None
 
 
 def analyze_position(fen: str):
@@ -57,7 +67,7 @@ def analyze_game(game, job, db):
                 before_lines = engine.analyse(
                     board,
                     chess.engine.Limit(depth=job.depth),
-                    multipv=2,
+                    multipv=settings.engine_multipv,
                 )
                 if isinstance(before_lines, dict):
                     before_lines = [before_lines]
@@ -103,7 +113,7 @@ def analyze_game(game, job, db):
                     best_move_gap=best_move_gap,
                     brilliant_sacrifice=bool(opponent_can_capture),
                 )
-                record = {"move_id": move_row.id, "job_id": job.id, "evaluation_before": before_cp/100, "evaluation_after": after_cp/100, "centipawn_loss": loss, "classification": classification, "best_move_uci": best_move.uci() if best_move else None, "principal_variation": [m.uci() for m in before.get("pv", [])]}
+                record = {"move_id": move_row.id, "job_id": job.id, "ply": move_row.ply, "move_number": move_row.move_number, "color": move_row.color, "played_move": move_row.uci, "evaluation_before": before_cp/100, "evaluation_after": after_cp/100, "centipawn_loss": loss, "classification": classification, "best_move_uci": best_move.uci() if best_move else None, "principal_variation": [m.uci() for m in before.get("pv", [])]}
                 analyses.append(record)
                 job.progress = int((index + 1) * 100 / total)
                 db.add(job); db.commit()
